@@ -27,11 +27,6 @@ const store = {
   set(k, v) { try { localStorage.setItem('sfa.' + k, JSON.stringify(v)); } catch { /* private mode: keep going */ } },
   del(k) { try { localStorage.removeItem('sfa.' + k); } catch { /* ignore */ } },
 };
-const session = {
-  get(k) { try { return sessionStorage.getItem('sfa.' + k); } catch { return null; } },
-  set(k, v) { try { sessionStorage.setItem('sfa.' + k, v); } catch { /* ignore */ } },
-  del(k) { try { sessionStorage.removeItem('sfa.' + k); } catch { /* ignore */ } },
-};
 
 const $ = (id) => document.getElementById(id);
 const body = document.body;
@@ -179,9 +174,12 @@ async function signIn() {
   if (!clientId) return showSetup();
   const verifier = randomString(64);
   const challenge = b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
-  const st = randomString(16);
-  session.set('verifier', verifier);
-  session.set('state', st);
+  const st = randomString(24);
+  // Keep the check values in localStorage (shared by all tabs), keyed by state, so the
+  // sign-in still completes if Spotify returns to a different tab or window than started it.
+  const pending = prunePending(store.get('pkce', {}));
+  pending[st] = { v: verifier, t: Date.now() };
+  store.set('pkce', pending);
   const q = new URLSearchParams({
     client_id: clientId,
     response_type: 'code',
@@ -215,30 +213,55 @@ async function finishSignIn() {
   const err = params.get('error');
   history.replaceState(null, '', REDIRECT_URI);
   if (err) throw new Error(err === 'access_denied' ? 'Sign-in was cancelled.' : `Spotify said: ${err}`);
-  if (params.get('state') !== session.get('state')) throw new Error('Sign-in check failed (state mismatch). Please try again.');
+  const pending = prunePending(store.get('pkce', {}));
+  const entry = pending[params.get('state') || ''];
+  if (!entry) {
+    store.set('pkce', pending);
+    // A stale or repeated return from Spotify: harmless if this browser is already signed in.
+    if (store.get('token', null)) return;
+    throw new Error('Sign-in check failed (state mismatch). Please try again.');
+  }
+  delete pending[params.get('state')];
+  store.set('pkce', pending);
   await tokenRequest({
     client_id: store.get('clientId', ''),
     grant_type: 'authorization_code',
     code,
     redirect_uri: REDIRECT_URI,
-    code_verifier: session.get('verifier') || '',
+    code_verifier: entry.v,
   });
-  session.del('verifier');
-  session.del('state');
+}
+function prunePending(p) { // drop sign-in attempts older than 15 minutes
+  const out = {};
+  for (const [k, e] of Object.entries(p || {})) if (e && Date.now() - e.t < 15 * 60 * 1000) out[k] = e;
+  return out;
 }
 
+/* Every open tab shares one sign-in. Spotify issues a new refresh token on each refresh and
+ * the old one stops working, so only one tab may refresh at a time, and the others re-read
+ * the result instead of refreshing again. */
 let refreshing = null;
 async function accessToken() {
   const t = store.get('token', null);
   if (!t || !t.access) return null;
   if (Date.now() < t.expires) return t.access;
   if (!t.refresh) return null;
-  refreshing = refreshing || tokenRequest({
-    client_id: store.get('clientId', ''),
-    grant_type: 'refresh_token',
-    refresh_token: t.refresh,
-  }).finally(() => { refreshing = null; });
-  await refreshing;
+  refreshing = refreshing || (navigator.locks
+    ? navigator.locks.request('sfa-token-refresh', refreshNow)
+    : refreshNow()).finally(() => { refreshing = null; });
+  return refreshing;
+}
+async function refreshNow() {
+  const t = store.get('token', null);           // re-read: another tab may have just refreshed
+  if (!t || !t.refresh) return null;
+  if (Date.now() < t.expires) return t.access;
+  try {
+    await tokenRequest({ client_id: store.get('clientId', ''), grant_type: 'refresh_token', refresh_token: t.refresh });
+  } catch (e) {
+    const now = store.get('token', null);       // lost a race with a tab without lock support?
+    if (now && now.refresh !== t.refresh && Date.now() < now.expires) return now.access;
+    return null;                                // refresh token no longer valid: sign in again
+  }
   return store.get('token', {}).access;
 }
 
@@ -252,7 +275,7 @@ class ApiError extends Error { constructor(status, msg) { super(msg); this.statu
 
 async function api(path, { method = 'GET', body: b, query } = {}) {
   if (Date.now() < state.retryUntil) throw new ApiError(429, 'rate limited');
-  const tok = await accessToken();
+  const tok = await accessToken().catch(() => null);
   if (!tok) throw new ApiError(401, 'not signed in');
   const url = `${API}${path}${query ? '?' + new URLSearchParams(query) : ''}`;
   const r = await fetch(url, {
@@ -323,6 +346,7 @@ function readItem(p) {
 /* ================================================================== polling */
 async function poll() {
   clearTimeout(state.pollTimer);
+  if (!state.active) return; // still on the setup screen or signing in: don't poll (or redirect)
   let p = null;
   try {
     p = DEMO ? demo.player() : await api('/me/player', { query: { additional_types: 'episode' } });
@@ -605,6 +629,8 @@ function bindUi() {
 
 /* ================================================================== setup screen */
 function showSetup(err) {
+  state.active = false;
+  clearTimeout(state.pollTimer);
   $('setup').hidden = false;
   $('bar').hidden = true;
   $('redirectUri').textContent = REDIRECT_URI;
@@ -713,6 +739,7 @@ async function start() {
     state.premium = true;
     state.user = 'Demo mode';
     note('Demo mode: sample pictures, controls work locally.');
+    state.active = true;
     return poll();
   }
 
@@ -733,6 +760,7 @@ async function start() {
     if (e.status === 403) return showSetup('Spotify refused this account. In Development Mode, add your Spotify email under "User Management" in your developer app, then try again.');
   }
   renderTransport();
+  state.active = true;
   poll();
 }
 
