@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' data: blob: https:; connect-src https://api.spotify.com https://accounts.spotify.com; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#000000">
+  <title>Now Playing</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <!-- Art: a blurred backdrop (used in "fit" mode) plus two Ken Burns layers that cross-fade -->
+  <div id="stage" aria-hidden="true">
+    <div id="backdrop"></div>
+    <div class="layer" id="layerA"></div>
+    <div class="layer" id="layerB"></div>
+    <div id="shade"></div>
+  </div>
+
+  <!-- Small song text, top left (can be hidden with the "i" button or the I key) -->
+  <div id="info" class="ui">
+    <div id="title"></div>
+    <div id="artist"></div>
+  </div>
+
+  <!-- Shown when nothing is playing -->
+  <div id="idle" hidden>
+    <div class="idle-box">
+      <div class="idle-title">Nothing playing</div>
+      <div class="idle-sub">Start something in any Spotify app. This page updates by itself.</div>
+    </div>
+  </div>
+
+  <!-- Bottom controls; fade out when the mouse or touch is idle -->
+  <div id="bar" class="ui" role="toolbar" aria-label="Playback controls">
+    <div id="progress" title="Seek">
+      <span id="tNow">0:00</span>
+      <div id="track"><div id="fill"></div><div id="knob"></div></div>
+      <span id="tEnd">0:00</span>
+    </div>
+    <div id="buttons">
+      <div class="group left">
+        <button id="bView" class="pill" title="Picture: album / artist / alternate (V)">Album</button>
+        <button id="bFit" class="pill" title="Fill the screen or fit the whole picture (C)">Fill</button>
+        <button id="bInfo" class="icon" title="Show or hide song text (I)" aria-label="Song text">
+          <svg viewBox="0 0 24 24"><path d="M11 10h2v7h-2zm0-3h2v2h-2z"/><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16z"/></svg>
+        </button>
+      </div>
+      <div class="group mid">
+        <button id="bPrev" class="icon ctl" title="Previous (←)" aria-label="Previous">
+          <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zM9.5 12 18 6v12z"/></svg>
+        </button>
+        <button id="bPlay" class="icon ctl big" title="Play / pause (Space)" aria-label="Play or pause">
+          <svg id="icoPlay" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+          <svg id="icoPause" viewBox="0 0 24 24" hidden><path d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>
+        </button>
+        <button id="bNext" class="icon ctl" title="Next (→)" aria-label="Next">
+          <svg viewBox="0 0 24 24"><path d="M16 6h2v12h-2zM6 18l8.5-6L6 6z"/></svg>
+        </button>
+      </div>
+      <div class="group right">
+        <div id="vol" title="Volume (↑ ↓)">
+          <svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9zm13.5 3A4.5 4.5 0 0 0 14 8v8a4.5 4.5 0 0 0 2.5-4z"/></svg>
+          <input id="volume" type="range" min="0" max="100" step="1" value="50" aria-label="Volume">
+        </div>
+        <button id="bFull" class="icon" title="Full screen (F)" aria-label="Full screen">
+          <svg viewBox="0 0 24 24"><path d="M5 5h5v2H7v3H5zm9 0h5v5h-2V7h-3zM5 14h2v3h3v2H5zm12 0h2v5h-5v-2h3z"/></svg>
+        </button>
+        <button id="bMenu" class="icon" title="Settings" aria-label="Settings">
+          <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+        </button>
+      </div>
+    </div>
+    <div id="note" hidden></div>
+  </div>
+
+  <!-- Small settings menu -->
+  <div id="menu" class="ui" hidden>
+    <div id="menuWho"></div>
+    <button id="mSpeed" class="row">Motion: normal</button>
+    <button id="mSetup" class="row">Change client ID</button>
+    <button id="mOut" class="row">Sign out</button>
+  </div>
+
+  <!-- First-run setup -->
+  <div id="setup" hidden>
+    <div class="card">
+      <h1>Spotify full-screen art</h1>
+      <p class="lead">Shows the song you're playing as slow-moving full-screen artwork, with controls that stay out of the way.</p>
+      <p>This page talks to Spotify directly from your browser. You need your own free Spotify developer app (one-time, about two minutes):</p>
+      <ol>
+        <li>Open <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a> and choose <b>Create app</b>.</li>
+        <li>Give it any name and description. Under <b>Redirect URIs</b>, add exactly:
+          <div class="copyrow"><code id="redirectUri"></code><button id="bCopy" type="button">Copy</button></div>
+        </li>
+        <li>Tick <b>Web API</b>, accept the terms, and save.</li>
+        <li>Open the app's <b>Settings</b>, copy the <b>Client ID</b>, and paste it here:</li>
+      </ol>
+      <div class="inrow">
+        <input id="clientId" type="text" placeholder="Client ID (32 letters and numbers)" autocomplete="off" spellcheck="false">
+        <button id="bSave" type="button">Save and sign in</button>
+      </div>
+      <p id="setupErr" class="err" hidden></p>
+      <p class="small">The client ID is stored only in this browser. No secret is needed. Spotify currently requires the developer app's owner to have Premium, and play/pause/skip/volume need Premium for whoever signs in; without it the art still works.</p>
+      <p class="small"><a href="?demo">Try the demo</a> to see the effect without signing in.</p>
+    </div>
+  </div>
+</body>
+</html>
